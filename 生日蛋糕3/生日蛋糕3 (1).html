@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>生日蛋糕3</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+            background: #000;
+            cursor: pointer;
+        }
+        #stage {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        canvas {
+            display: block;
+        }
+        /* 提示文字 */
+        #hint {
+            position: fixed;
+            bottom: 6vh;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: rgba(255, 235, 180, 0.85);
+            font-family: "KaiTi", "STKaiti", serif;
+            font-size: clamp(16px, 2.6vw, 26px);
+            letter-spacing: 4px;
+            text-shadow: 0 0 12px rgba(255, 200, 100, 0.6);
+            animation: breath 2.2s ease-in-out infinite;
+            transition: opacity 1s;
+            pointer-events: none;
+            z-index: 2;
+        }
+        #hint.hide { opacity: 0; }
+        @keyframes breath {
+            0%, 100% { opacity: 0.35; }
+            50%      { opacity: 0.95; }
+        }
+    </style>
+</head>
+<body>
+    <div id="stage"><canvas id="cv"></canvas></div>
+    <div id="hint">轻触屏幕，点亮生日歌</div>
+
+    <audio id="music1" loop preload="auto" hidden>
+        <source src="http://music.163.com/song/media/outer/url?id=1963443271.mp3">
+        Your browser does not support the audio element.
+    </audio>
+
+    <script>
+    /* =========================================================
+       星空生日蛋糕 —— 纯 Canvas 复刻
+       画面元素：黑底星空 + 深蓝银河蛋糕(彩漆泼溅/滴落) +
+       彩色糖珠顶 + 奶油蜡烛火焰 + 白瓷盘 + 环绕星星泡泡 +
+       金色轨道环 + 飘浮粒子
+       ========================================================= */
+    const cv = document.getElementById('cv');
+    const ctx = cv.getContext('2d');
+
+    /* 逻辑坐标系 900 x 1200，自动缩放适配屏幕 */
+    const VW = 900, VH = 1200;
+    let scale = 1, ox = 0, oy = 0;
+
+    /* ---------- 场景几何参数 ---------- */
+    const CX = 450;                 // 蛋糕中轴
+    const TOP_Y = 585;              // 蛋糕顶面中心 y
+    const BOT_Y = 792;              // 蛋糕底面中心 y
+    const RX = 150, RY = 40;        // 顶/底椭圆半径
+    const CANDLE_TOP = 448;         // 蜡烛顶 y
+    const SPHERE_CY = 492;          // 星星泡泡球心 y
+    const SPHERE_R = 332;           // 泡泡半径
+
+    /* 调色板 */
+    const PALETTE = ['#ff4d4d','#ff8ad8','#ffd700','#4da6ff','#57d7a1',
+                     '#b06cf5','#ff9f43','#ffffff','#7fd4ff','#f5e663'];
+    const SPLASH  = ['#2e6fe0','#3fa9f5','#e94f9d','#f5c542','#57d7a1',
+                     '#8a5cf5','#ffffff','#4dd0e4'];
+
+    /* 随机工具（带种子，保证每次刷新形状一致） */
+    let seed = 20261006;
+    function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    function rr(a, b) { return a + rnd() * (b - a); }
+
+    /* ---------- 星星泡泡粒子 ---------- */
+    const orbs = [];
+    (function initOrbs() {
+        const N = 190;
+        for (let i = 0; i < N; i++) {
+            const th = Math.acos(2 * rnd() - 1);        // 极角
+            const ph = rnd() * Math.PI * 2;             // 方位角
+            const rad = SPHERE_R * rr(0.62, 1.0);
+            const t = rnd();
+            let type = t < 0.42 ? 'star' : (t < 0.82 ? 'dot' : (t < 0.92 ? 'orb' : 'blob'));
+            orbs.push({
+                th, ph, rad, type,
+                size: type === 'star' ? rr(5, 14) :
+                      type === 'dot'  ? rr(2.5, 7)  :
+                      type === 'orb'  ? rr(6, 11)   : rr(9, 22),
+                color: PALETTE[(rnd() * PALETTE.length) | 0],
+                spin: rr(-1, 1) * 0.8,
+                twS: rr(0.8, 2.4),                      // 闪烁速度
+                phase: rnd() * Math.PI * 2
+            });
+        }
+    })();
+
+    /* ---------- 飘浮尘埃 ---------- */
+    const dust = [];
+    (function initDust() {
+        for (let i = 0; i < 26; i++) {
+            dust.push({
+                x: rr(60, 840), y: rr(200, 1150),
+                r: rr(1.5, 4), vy: rr(-14, -5), vx: rr(-4, 4),
+                color: PALETTE[(rnd() * PALETTE.length) | 0],
+                twS: rr(0.5, 1.6), phase: rnd() * 6.28
+            });
+        }
+    })();
+
+    /* ---------- 静态层：背景 + 蛋糕（离屏预渲染） ---------- */
+    let bgLayer = null, cakeLayer = null;
+
+    function buildStatic() {
+        const Q = 2;  // 超采样倍率
+        /* --- 背景：黑底 + 星云薄雾 + 素描弧线 --- */
+        bgLayer = document.createElement('canvas');
+        bgLayer.width = VW * Q; bgLayer.height = VH * Q;
+        const b = bgLayer.getContext('2d');
+        b.scale(Q, Q);
+        const g = b.createRadialGradient(450, 520, 80, 450, 520, 720);
+        g.addColorStop(0, '#0b0d18');
+        g.addColorStop(0.55, '#06060c');
+        g.addColorStop(1, '#000000');
+        b.fillStyle = g;
+        b.fillRect(0, 0, VW, VH);
+
+        /* 淡淡的星云雾团 */
+        for (let i = 0; i < 14; i++) {
+            const x = rr(120, 780), y = rr(120, 900), r = rr(60, 170);
+            const ng = b.createRadialGradient(x, y, 0, x, y, r);
+            const c = rnd() < 0.5 ? '90,120,220' : '180,150,220';
+            ng.addColorStop(0, 'rgba(' + c + ',0.05)');
+            ng.addColorStop(1, 'rgba(' + c + ',0)');
+            b.fillStyle = ng;
+            b.beginPath(); b.arc(x, y, r, 0, 6.29); b.fill();
+        }
+        /* 灰白素描弧线（视频里的手绘笔触） */
+        b.strokeStyle = 'rgba(150,150,170,0.20)';
+        b.lineWidth = 7; b.lineCap = 'round';
+        b.beginPath(); b.arc(450, 500, SPHERE_R + 26, Math.PI * 1.08, Math.PI * 1.52); b.stroke();
+        b.beginPath(); b.arc(450, 500, SPHERE_R + 30, Math.PI * 0.12, Math.PI * 0.5); b.stroke();
+        b.strokeStyle = 'rgba(120,120,140,0.16)';
+        b.lineWidth = 5;
+        b.beginPath(); b.arc(450, 500, SPHERE_R + 44, Math.PI * 1.2, Math.PI * 1.42); b.stroke();
+
+        /* --- 蛋糕静态层 --- */
+        cakeLayer = document.createElement('canvas');
+        cakeLayer.width = VW * Q; cakeLayer.height = VH * Q;
+        const c = cakeLayer.getContext('2d');
+        c.scale(Q, Q);
+        c.lineCap = 'round';
+
+        /* 白瓷盘（略带透视的椭圆） */
+        c.save();
+        c.translate(450, 828);
+        /* 盘底阴影 */
+        c.fillStyle = 'rgba(0,0,0,0.55)';
+        c.beginPath(); c.ellipse(0, 26, 252, 44, 0, 0, 6.29); c.fill();
+        /* 盘面 */
+        let pg = c.createLinearGradient(0, -55, 0, 55);
+        pg.addColorStop(0, '#ffffff');
+        pg.addColorStop(0.55, '#e9edf6');
+        pg.addColorStop(1, '#9fb2d8');
+        c.fillStyle = pg;
+        c.beginPath(); c.ellipse(0, 0, 248, 54, 0, 0, 6.29); c.fill();
+        /* 盘内凹面 */
+        c.fillStyle = 'rgba(160,175,210,0.45)';
+        c.beginPath(); c.ellipse(0, -4, 196, 38, 0, 0, 6.29); c.fill();
+        /* 盘沿高光 */
+        c.strokeStyle = 'rgba(255,255,255,0.85)'; c.lineWidth = 3;
+        c.beginPath(); c.ellipse(0, -6, 236, 46, 0, Math.PI * 1.05, Math.PI * 1.8); c.stroke();
+        c.strokeStyle = 'rgba(90,120,200,0.5)'; c.lineWidth = 2.5;
+        c.beginPath(); c.ellipse(0, -2, 240, 50, 0, Math.PI * 0.15, Math.PI * 0.85); c.stroke();
+        /* 盘上彩色斑点 */
+        for (let i = 0; i < 26; i++) {
+            const a = rr(0, 6.29), r2 = rr(150, 235);
+            c.fillStyle = PALETTE[(rnd() * PALETTE.length) | 0];
+            c.globalAlpha = rr(0.35, 0.85);
+            c.beginPath();
+            c.arc(Math.cos(a) * r2, -4 + Math.sin(a) * r2 * 0.2, rr(1.5, 4.5), 0, 6.29);
+            c.fill();
+        }
+        c.globalAlpha = 1;
+        c.restore();
+
+        /* ---- 蛋糕侧身 ---- */
+        c.save();
+        const body = new Path2D();
+        body.moveTo(CX - RX, TOP_Y);
+        body.lineTo(CX - RX, BOT_Y);
+        body.ellipse(CX, BOT_Y, RX, RY, 0, Math.PI, 0, true);   // 底部前弧
+        body.lineTo(CX + RX, TOP_Y);
+        body.ellipse(CX, TOP_Y, RX, RY, 0, 0, Math.PI, false);  // 顶部前弧(下沿)
+        body.closePath();
+
+        let bgd = c.createLinearGradient(0, TOP_Y - RY, 0, BOT_Y + RY);
+        bgd.addColorStop(0, '#2a3a78');
+        bgd.addColorStop(0.35, '#16204e');
+        bgd.addColorStop(1, '#0a0f2e');
+        c.fillStyle = bgd;
+        c.fill(body);
+
+        /* 侧身彩色泼溅（裁剪在蛋糕内） */
+        c.save();
+        c.clip(body);
+        for (let i = 0; i < 85; i++) {
+            const x = CX + rr(-RX, RX);
+            const y = rr(TOP_Y + 8, BOT_Y + 10);
+            c.globalAlpha = rr(0.18, 0.55);
+            c.fillStyle = SPLASH[(rnd() * SPLASH.length) | 0];
+            c.beginPath();
+            c.ellipse(x, y, rr(6, 30), rr(5, 18), rr(0, 3.14), 0, 6.29);
+            c.fill();
+            /* 泼溅卫星点 */
+            if (rnd() < 0.6) {
+                c.beginPath();
+                c.arc(x + rr(-34, 34), y + rr(-16, 16), rr(1.5, 4), 0, 6.29);
+                c.fill();
+            }
+        }
+        /* 侧身竖向滴落彩漆 */
+        for (let i = 0; i < 12; i++) {
+            const x = CX + rr(-RX * 0.85, RX * 0.85);
+            const y0 = TOP_Y + RY * Math.sqrt(Math.max(0, 1 - ((x - CX) / RX) ** 2)) - 2;
+            const len = rr(36, 110), w = rr(5, 11);
+            c.globalAlpha = rr(0.4, 0.7);
+            c.fillStyle = SPLASH[(rnd() * SPLASH.length) | 0];
+            c.beginPath();
+            c.moveTo(x - w / 2, y0);
+            c.lineTo(x - w / 2, y0 + len - w / 2);
+            c.arc(x, y0 + len - w / 2, w / 2, Math.PI, 0, true);
+            c.lineTo(x + w / 2, y0);
+            c.closePath(); c.fill();
+            if (rnd() < 0.5) {  /* 垂落的漆滴 */
+                c.beginPath();
+                c.arc(x, y0 + len + rr(8, 26), w * 0.32, 0, 6.29);
+                c.fill();
+            }
+        }
+        /* 左下青色大块漆斑（视频特征） */
+        c.globalAlpha = 0.5;
+        c.fillStyle = '#3fc9c0';
+        c.beginPath(); c.ellipse(CX - 62, BOT_Y - 28, 30, 44, 0.3, 0, 6.29); c.fill();
+        c.globalAlpha = 0.35;
+        c.fillStyle = '#2e9fd8';
+        c.beginPath(); c.ellipse(CX - 40, BOT_Y - 60, 20, 30, 0, 0, 6.29); c.fill();
+        c.globalAlpha = 1;
+        c.restore();
+
+        /* 侧身暗部（左右边缘立体感） */
+        c.save();
+        c.clip(body);
+        let sh = c.createLinearGradient(CX - RX, 0, CX + RX, 0);
+        sh.addColorStop(0, 'rgba(0,0,10,0.55)');
+        sh.addColorStop(0.2, 'rgba(0,0,10,0)');
+        sh.addColorStop(0.78, 'rgba(0,0,10,0)');
+        sh.addColorStop(1, 'rgba(0,0,10,0.6)');
+        c.fillStyle = sh;
+        c.fillRect(CX - RX, TOP_Y - RY, RX * 2, BOT_Y - TOP_Y + RY * 2);
+        c.restore();
+        c.restore();
+
+        /* ---- 蛋糕顶面：星河糖珠 ---- */
+        c.save();
+        c.fillStyle = '#101a45';
+        c.beginPath(); c.ellipse(CX, TOP_Y, RX, RY, 0, 0, 6.29); c.fill();
+        /* 顶面边缘高光 */
+        c.strokeStyle = 'rgba(120,150,255,0.35)'; c.lineWidth = 2;
+        c.beginPath(); c.ellipse(CX, TOP_Y, RX, RY, 0, Math.PI * 1.1, Math.PI * 1.9); c.stroke();
+        /* 中央彩色糖珠堆（铺满整个顶面） */
+        for (let i = 0; i < 330; i++) {
+            const a = rr(0, 6.29), r2 = Math.sqrt(rnd());
+            const x = CX + Math.cos(a) * r2 * (RX - 6);
+            const y = TOP_Y + Math.sin(a) * r2 * (RY - 4) - rr(0, 10);
+            c.globalAlpha = rr(0.75, 1);
+            c.fillStyle = PALETTE[(rnd() * PALETTE.length) | 0];
+            c.beginPath();
+            c.ellipse(x, y, rr(3, 8), rr(2.5, 6), rr(0, 3), 0, 6.29);
+            c.fill();
+            /* 糖珠高光点 */
+            if (rnd() < 0.25) {
+                c.globalAlpha = 0.8;
+                c.fillStyle = '#ffffff';
+                c.beginPath(); c.arc(x - 1, y - 1, 1, 0, 6.29); c.fill();
+            }
+        }
+        /* 顶沿溢出的糖珠（垂在侧身上缘） */
+        for (let i = 0; i < 40; i++) {
+            const x = CX + rr(-RX + 8, RX - 8);
+            const y = TOP_Y + RY * Math.sqrt(Math.max(0, 1 - ((x - CX) / RX) ** 2)) + rr(0, 14);
+            c.globalAlpha = rr(0.6, 0.95);
+            c.fillStyle = PALETTE[(rnd() * PALETTE.length) | 0];
+            c.beginPath(); c.arc(x, y, rr(2, 4.5), 0, 6.29); c.fill();
+        }
+        /* 奶油色大泼溅团（蜡烛根部周围） */
+        const cream = [['#fff6d8', CX - 55, TOP_Y - 16, 30], ['#ffe9a8', CX + 40, TOP_Y - 20, 26],
+                       ['#ffd2e0', CX + 8, TOP_Y - 26, 22], ['#fff2c8', CX - 15, TOP_Y - 8, 18],
+                       ['#ffc46b', CX + 68, TOP_Y - 4, 16], ['#f8f8ff', CX - 92, TOP_Y + 2, 14]];
+        for (const [col, x, y, r2] of cream) {
+            const cg = c.createRadialGradient(x, y, 0, x, y, r2 * 1.6);
+            cg.addColorStop(0, col);
+            cg.addColorStop(0.7, col);
+            cg.addColorStop(1, 'rgba(255,255,255,0)');
+            c.globalAlpha = 0.85;
+            c.fillStyle = cg;
+            c.beginPath(); c.arc(x, y, r2 * 1.6, 0, 6.29); c.fill();
+        }
+        c.globalAlpha = 1;
+        c.restore();
+
+        /* ---- 蜡烛 ---- */
+        c.save();
+        c.translate(CX, 0);
+        let cg2 = c.createLinearGradient(-9, 0, 9, 0);
+        cg2.addColorStop(0, '#d9a95f');
+        cg2.addColorStop(0.4, '#ffefc2');
+        cg2.addColorStop(1, '#e5b96e');
+        c.fillStyle = cg2;
+        roundRect(c, -8, CANDLE_TOP, 16, TOP_Y - CANDLE_TOP + 16, 7);
+        c.fill();
+        /* 蜡烛高光 */
+        c.strokeStyle = 'rgba(255,255,255,0.5)'; c.lineWidth = 2;
+        c.beginPath(); c.moveTo(-3.5, CANDLE_TOP + 8); c.lineTo(-3.5, TOP_Y + 6); c.stroke();
+        /* 烛芯 */
+        c.strokeStyle = '#3a2c1a'; c.lineWidth = 2.5;
+        c.beginPath(); c.moveTo(0, CANDLE_TOP); c.quadraticCurveTo(1.5, CANDLE_TOP - 6, 0.5, CANDLE_TOP - 10); c.stroke();
+        c.restore();
+
+        /* ---- 正面文字 happy birthday ---- */
+        c.save();
+        c.textAlign = 'center';
+        c.font = '30px "Segoe Script","Comic Sans MS","KaiTi",cursive';
+        c.fillStyle = 'rgba(235,238,250,0.92)';
+        c.shadowColor = 'rgba(150,180,255,0.6)';
+        c.shadowBlur = 6;
+        c.fillText('happy birthday', CX, 738);
+        c.shadowBlur = 0;
+        /* 下方青色小涂鸦 */
+        c.strokeStyle = 'rgba(90,210,200,0.8)'; c.lineWidth = 2;
+        c.beginPath();
+        c.moveTo(CX - 46, 758);
+        for (let x = 0; x <= 92; x += 8) c.lineTo(CX - 46 + x, 758 + Math.sin(x * 0.55) * 3.5);
+        c.stroke();
+        c.fillStyle = 'rgba(90,210,200,0.7)';
+        for (let i = 0; i < 5; i++) {
+            c.beginPath();
+            c.arc(CX - 30 + i * 15, 770 + ((i % 2) ? 3 : 0), 1.6, 0, 6.29);
+            c.fill();
+        }
+        c.restore();
+    }
+
+    function roundRect(c, x, y, w, h, r) {
+        c.beginPath();
+        c.moveTo(x + r, y);
+        c.arcTo(x + w, y, x + w, y + h, r);
+        c.arcTo(x + w, y + h, x, y + h, r);
+        c.arcTo(x, y + h, x, y, r);
+        c.arcTo(x, y, x + w, y, r);
+        c.closePath();
+    }
+
+    /* ---------- 动态绘制 ---------- */
+    function starPath(c, x, y, r, rot) {
+        c.beginPath();
+        for (let i = 0; i < 10; i++) {
+            const a = rot + i * Math.PI / 5 - Math.PI / 2;
+            const r2 = i % 2 ? r * 0.45 : r;
+            c[i ? 'lineTo' : 'moveTo'](x + Math.cos(a) * r2, y + Math.sin(a) * r2);
+        }
+        c.closePath();
+    }
+
+    function drawOrbParticle(c, p, t, rot) {
+        const ph = p.ph + rot;
+        const sinT = Math.sin(p.th);
+        const x = p.rad * sinT * Math.sin(ph);
+        const z = p.rad * sinT * Math.cos(ph);   // >0 靠近观众
+        const y = p.rad * Math.cos(p.th) * 0.96;
+        const sx = CX + x, sy = SPHERE_CY + y;
+        const depth = (z / SPHERE_R + 1) / 2;    // 0 后 → 1 前
+        const sc = 0.72 + 0.38 * depth;
+        const tw = 0.55 + 0.45 * Math.sin(t * p.twS + p.phase);
+        const alpha = (0.28 + 0.72 * depth) * tw;
+
+        c.save();
+        if (p.type === 'star') {
+            c.globalAlpha = alpha;
+            c.fillStyle = p.color;
+            starPath(c, sx, sy, p.size * sc, p.spin + t * 0.15);
+            c.fill();
+        } else if (p.type === 'dot') {
+            c.globalAlpha = alpha;
+            c.fillStyle = p.color;
+            c.beginPath(); c.arc(sx, sy, p.size * sc, 0, 6.29); c.fill();
+        } else if (p.type === 'orb') {
+            /* 发光圆珠 */
+            const r2 = p.size * sc * 2.4;
+            const g = c.createRadialGradient(sx, sy, 0, sx, sy, r2);
+            g.addColorStop(0, 'rgba(255,255,255,' + (0.9 * tw) + ')');
+            g.addColorStop(0.3, p.color);
+            g.addColorStop(1, 'rgba(255,255,255,0)');
+            c.globalAlpha = alpha;
+            c.fillStyle = g;
+            c.beginPath(); c.arc(sx, sy, r2, 0, 6.29); c.fill();
+        } else {
+            /* 颜料泼溅团 */
+            c.globalAlpha = alpha * 0.55;
+            c.fillStyle = p.color;
+            const s = p.size * sc;
+            c.beginPath();
+            c.ellipse(sx, sy, s, s * 0.7, p.phase, 0, 6.29);
+            c.fill();
+            c.beginPath(); c.arc(sx + s * 0.9, sy - s * 0.3, s * 0.22, 0, 6.29); c.fill();
+            c.beginPath(); c.arc(sx - s * 0.8, sy + s * 0.4, s * 0.16, 0, 6.29); c.fill();
+        }
+        c.restore();
+    }
+
+    function drawFlame(c, t) {
+        const sway = Math.sin(t * 1.1) * 3 + Math.sin(t * 2.7) * 1.5;
+        const fx = CX + sway;
+        const fy = CANDLE_TOP - 10;
+        const fl = 1 + 0.14 * Math.sin(t * 13) + 0.09 * Math.sin(t * 7.3 + 1.7)
+                     + 0.05 * Math.sin(t * 23 + 0.5);
+
+        c.save();
+        c.globalCompositeOperation = 'lighter';
+
+        /* 大范围暖光晕 */
+        let g = c.createRadialGradient(fx, fy - 34, 0, fx, fy - 34, 190 * fl);
+        g.addColorStop(0, 'rgba(255,190,90,0.42)');
+        g.addColorStop(0.35, 'rgba(255,150,60,0.16)');
+        g.addColorStop(1, 'rgba(255,140,50,0)');
+        c.fillStyle = g;
+        c.beginPath(); c.arc(fx, fy - 34, 190 * fl, 0, 6.29); c.fill();
+
+        /* 焰身外层（橙） */
+        flameShape(c, fx, fy, 15 * fl, 52 * fl, 'rgba(255,120,30,0.55)');
+        /* 焰身中层（黄） */
+        flameShape(c, fx, fy + 3, 10 * fl, 38 * fl, 'rgba(255,210,70,0.85)');
+        /* 焰心（白） */
+        flameShape(c, fx, fy + 6, 5.5 * fl, 24 * fl, 'rgba(255,255,240,0.95)');
+
+        /* 火焰底部蓝色 */
+        c.globalAlpha = 0.7;
+        const bg2 = c.createRadialGradient(fx, fy + 6, 0, fx, fy + 6, 12);
+        bg2.addColorStop(0, 'rgba(80,140,255,0.7)');
+        bg2.addColorStop(1, 'rgba(80,140,255,0)');
+        c.fillStyle = bg2;
+        c.beginPath(); c.arc(fx, fy + 6, 12, 0, 6.29); c.fill();
+        c.restore();
+
+        /* 火光映在顶面 */
+        c.save();
+        c.globalCompositeOperation = 'lighter';
+        const lg = c.createRadialGradient(CX, TOP_Y - 6, 0, CX, TOP_Y - 6, 170);
+        lg.addColorStop(0, 'rgba(255,180,80,' + (0.20 + 0.06 * fl) + ')');
+        lg.addColorStop(1, 'rgba(255,150,60,0)');
+        c.fillStyle = lg;
+        c.beginPath(); c.ellipse(CX, TOP_Y, 170, 90, 0, 0, 6.29); c.fill();
+        c.restore();
+    }
+
+    function flameShape(c, x, y, w, h, color) {
+        c.fillStyle = color;
+        c.beginPath();
+        c.moveTo(x, y - h);
+        c.bezierCurveTo(x + w, y - h * 0.42, x + w, y, x, y + h * 0.12);
+        c.bezierCurveTo(x - w, y, x - w, y - h * 0.42, x, y - h);
+        c.fill();
+    }
+
+    function drawRings(c, t) {
+        c.save();
+        /* 金色轨道细环 */
+        c.strokeStyle = 'rgba(216,178,90,0.22)';
+        c.lineWidth = 1.4;
+        c.beginPath(); c.ellipse(CX, SPHERE_CY, SPHERE_R + 4, (SPHERE_R + 4) * 0.94, -0.18, 0, 6.29); c.stroke();
+        /* 金色亮弧段（旋转） */
+        const seg1 = t * 0.5;
+        c.strokeStyle = 'rgba(240,200,110,0.85)';
+        c.lineWidth = 2.2;
+        c.beginPath(); c.ellipse(CX, SPHERE_CY, SPHERE_R + 4, (SPHERE_R + 4) * 0.94, -0.18, seg1, seg1 + 0.7); c.stroke();
+        c.beginPath(); c.ellipse(CX, SPHERE_CY, SPHERE_R + 4, (SPHERE_R + 4) * 0.94, -0.18, seg1 + 3.5, seg1 + 3.9); c.stroke();
+
+        /* 白色外环 */
+        c.strokeStyle = 'rgba(255,255,255,0.14)';
+        c.lineWidth = 1.2;
+        c.beginPath(); c.ellipse(CX, SPHERE_CY, SPHERE_R + 22, (SPHERE_R + 22) * 0.97, 0.12, 0, 6.29); c.stroke();
+        const seg2 = -t * 0.34 + 2;
+        c.strokeStyle = 'rgba(255,255,255,0.55)';
+        c.lineWidth = 1.8;
+        c.beginPath(); c.ellipse(CX, SPHERE_CY, SPHERE_R + 22, (SPHERE_R + 22) * 0.97, 0.12, seg2, seg2 + 0.55); c.stroke();
+        c.restore();
+    }
+
+    /* ---------- 尺寸自适应 ---------- */
+    function resize() {
+        const dpr = window.devicePixelRatio || 1;
+        const w = innerWidth, h = innerHeight;
+        cv.width = w * dpr; cv.height = h * dpr;
+        cv.style.width = w + 'px'; cv.style.height = h + 'px';
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        scale = Math.min(w / VW, h / VH);
+        ox = (w - VW * scale) / 2;
+        oy = (h - VH * scale) / 2;
+        buildStatic();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    /* ---------- 主循环 ---------- */
+    let t0 = performance.now();
+    function frame(now) {
+        /* 防御：now 无效（后台节流/手动调用）时退回当前时间，避免 NaN 崩溃 */
+        if (typeof now !== 'number' || !isFinite(now)) now = performance.now();
+        const t = Math.max(0, (now - t0) / 1000);
+        const rot = t * 0.16;                 // 泡泡旋转速度
+        const bob = Math.sin(t * 0.55) * 6;   // 整体轻微浮动
+
+        ctx.clearRect(0, 0, innerWidth, innerHeight);
+        ctx.save();
+        ctx.translate(ox, oy + bob * scale);
+        ctx.scale(scale, scale);
+
+        /* 1. 背景 */
+        ctx.drawImage(bgLayer, 0, 0, VW, VH);
+
+        /* 2. 远景小星星（闪烁） */
+        ctx.save();
+        for (let i = 0; i < 55; i++) {
+            const a = (i * 137.5) % 360 * 0.01745;
+            const r2 = 200 + (i * 89) % 420;
+            const x = 450 + Math.cos(a) * r2 * 1.15;
+            const y = 480 + Math.sin(a) * r2 * 0.9;
+            const tw = 0.25 + 0.5 * Math.abs(Math.sin(t * (0.4 + i % 5 * 0.22) + i));
+            ctx.globalAlpha = tw;
+            ctx.fillStyle = i % 4 ? '#cfd8ff' : '#ffe9b0';
+            ctx.fillRect(x, y, 1.6, 1.6);
+        }
+        ctx.restore();
+
+        /* 3. 泡泡后半（在蛋糕后面） */
+        for (const p of orbs) {
+            const ph = p.ph + rot;
+            const z = p.rad * Math.sin(p.th) * Math.cos(ph);
+            if (z <= 0) drawOrbParticle(ctx, p, t, rot);
+        }
+
+        /* 4. 蛋糕主体 */
+        ctx.drawImage(cakeLayer, 0, 0, VW, VH);
+
+        /* 5. 火焰 */
+        drawFlame(ctx, t);
+
+        /* 6. 泡泡前半（蛋糕前面） */
+        for (const p of orbs) {
+            const ph = p.ph + rot;
+            const z = p.rad * Math.sin(p.th) * Math.cos(ph);
+            if (z > 0) drawOrbParticle(ctx, p, t, rot);
+        }
+
+        /* 7. 轨道环 */
+        drawRings(ctx, t);
+
+        /* 8. 飘浮尘埃 */
+        ctx.save();
+        for (const d of dust) {
+            d.y += d.vy * 0.016; d.x += d.vx * 0.016;
+            if (d.y < 80) { d.y = 1150; d.x = rr(60, 840); }
+            const tw = 0.3 + 0.6 * Math.abs(Math.sin(t * d.twS + d.phase));
+            ctx.globalAlpha = tw * 0.8;
+            ctx.fillStyle = d.color;
+            ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, 6.29); ctx.fill();
+        }
+        ctx.restore();
+
+        ctx.restore();
+        requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    /* ---------- 点击播放音乐 ---------- */
+    document.body.addEventListener('click', function () {
+        var myAudio = document.getElementById('music1');
+        myAudio.play().catch(function () {});
+        document.getElementById('hint').classList.add('hide');
+    });
+    </script>
+</body>
+</html>
